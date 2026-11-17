@@ -105,6 +105,35 @@ bar**, that recovery works after a source failure or restart, and that only one
 publisher and one active Live Story exist. Never test against a production
 publisher's session or state volume.
 
+## Publishing Docker images
+
+The default Compose file uses published images. For local container development,
+add `-f docker-compose.yml -f docker-compose.build.yml` to Compose commands; see
+the [local build instructions](README.md#build-docker-images-locally).
+
+After the release commit passes CI and contains the publishing workflow, push a
+tag with two or three numeric components:
+
+```sh
+git tag v1.2.3
+git push origin v1.2.3
+```
+
+Tags such as `v0.1`, `v12.34`, and `v0.1.0` trigger publishing; `v1`, `v1.2.3.4`,
+and `v1.2-beta` do not. A `v1.2.3` tag publishes these Linux AMD64 images:
+
+- `ghcr.io/ragnarok22/telegram-stream:v1.2.3` and `:latest` (main publisher).
+- `ghcr.io/ragnarok22/telegram-stream:v1.2.3-web` and `:web` (browser sidecar).
+
+The workflow uses the automatic `GITHUB_TOKEN` with `packages: write`; no
+additional registry secret is needed. The `latest` and `web` aliases follow
+publication order, not numerical version order. Tag pushes are not processed
+retroactively: create a new version tag on a commit containing the workflow
+if an earlier tag did not trigger publishing.
+
+After the first successful publication, open the package's settings in GitHub
+Packages and change its visibility to **Public** to allow unauthenticated pulls.
+
 ## Issues and pull requests
 
 For bug reports, include:

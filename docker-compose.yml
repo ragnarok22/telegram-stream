@@ -1,9 +1,6 @@
 services:
   streamer:
-    build:
-      context: .
-      target: runtime
-    image: telegram-stream:local
+    image: ${STREAMER_IMAGE:-ghcr.io/ragnarok22/telegram-stream:latest}
     init: true
     restart: unless-stopped
     cpus: ${STREAMER_CPU_LIMIT:-2.0}
@@ -37,10 +34,7 @@ services:
 
   web:
     profiles: ["web"]
-    build:
-      context: .
-      target: web
-    image: telegram-stream:web
+    image: ${WEB_IMAGE:-ghcr.io/ragnarok22/telegram-stream:web}
     init: true
     restart: unless-stopped
     cpus: ${WEB_CPU_LIMIT:-2.0}

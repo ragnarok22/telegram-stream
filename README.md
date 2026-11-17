@@ -6,224 +6,112 @@
 [![Ruff][badge-ruff]][ruff]
 [![License: MIT][badge-license]](LICENSE)
 
-Publish YouTube Live, HLS, looped local video, or a rendered web page to
-**Telegram Channel Live Stories**, with supervised FFmpeg publishing and restart
-recovery. Output appears in the channel's **story bar**, not as a traditional
-channel livestream.
+Stream **YouTube Live, HLS, looped video files, or a web page** to
+**Telegram Channel Live Stories**. Video appears in the channel's **story bar**,
+not as a traditional channel livestream. FFmpeg publishing is supervised, with
+restart recovery.
+
+**Recommended setup:** use the published Docker images. Download two configuration
+files, edit your settings, sign in to Telegram, and start. No Git clone, Python,
+FFmpeg installation, or local image build is needed.
 
 > [!IMPORTANT]
 > Alpha software: recovery does not guarantee uninterrupted video or unlimited
 > story duration. Telegram eligibility, rate limits, and source restrictions
 > still apply. Test with a dedicated channel first.
 
-## Quick start: Docker Compose
+[Quick start](#quick-start) · [Configuration](#configuration) ·
+[Sources](#sources) · [Everyday commands](#everyday-commands) ·
+[Troubleshooting](#troubleshooting) · [Local development](#local-development)
 
-You need Docker Compose v2 and a Telegram **user account** with permission to
-post stories in an eligible broadcast channel. Grant video-chat/live-stream
-management where Telegram requires it. Bot tokens do not work.
+## Quick start
 
-**1. Clone and configure:**
+### Before you start
+
+- Install **Docker with Compose v2** and **curl**.
+- Published images target **Linux AMD64**. ARM hosts need AMD64 emulation or a
+  [local build](#build-docker-images-locally).
+- Use a **Telegram user account**, not a bot token. It must be allowed to post
+  stories in an eligible broadcast channel. Grant video-chat/live-stream
+  management where Telegram requires it.
+- Get your **API ID and API hash** from [my.telegram.org/apps](https://my.telegram.org/apps).
+
+### 1. Download the configuration
+
+For a **new installation**, run:
 
 ```sh
-git clone https://github.com/ragnarok22/telegram-stream.git
-cd telegram-stream
-cp .env.example .env
+mkdir telegram-stream && cd telegram-stream
+curl -fsSL https://raw.githubusercontent.com/ragnarok22/telegram-stream/main/docker-compose.yml -o docker-compose.yml
+curl -fsSL https://raw.githubusercontent.com/ragnarok22/telegram-stream/main/.env.example -o .env
 chmod 600 .env
 mkdir -p media
 ```
 
-Edit `.env` with your [Telegram API credentials](https://my.telegram.org/apps),
-channel, and source:
+These commands download configuration files, not an installation script.
+For an existing installation, [update the images](#update-the-images) instead;
+do not overwrite your `.env`.
+
+### 2. Set your Telegram account, channel, and source
+
+Open `.env` in a text editor, for example `nano .env`. Start with these five
+settings; leave the rest at their defaults:
 
 ```dotenv
 TELEGRAM_API_ID=123456
-TELEGRAM_API_HASH=your_32_character_api_hash
+TELEGRAM_API_HASH=your_api_hash
 TELEGRAM_CHANNEL=@your_channel
 SOURCE_TYPE=youtube
 SOURCE=https://www.youtube.com/watch?v=YOUR_LIVE_VIDEO_ID
 ```
 
-Replace the example values. `TELEGRAM_CHANNEL` also accepts a numeric `-100…`
-peer ID. For other inputs, see [Sources](#sources).
+| Setting | What to enter |
+| --- | --- |
+| `TELEGRAM_API_ID` | Numeric API ID from my.telegram.org, not your phone number |
+| `TELEGRAM_API_HASH` | API hash from the same page, not a bot token |
+| `TELEGRAM_CHANNEL` | Channel username (`@your_channel`) or numeric peer ID (`-100…`) |
+| `SOURCE_TYPE` | `youtube`, `hls`, `file`, or `web`; `auto` also detects media URLs and local paths |
+| `SOURCE` | A currently live YouTube URL, HLS URL, container file path, or web page URL |
 
-**2. Authenticate, then start:**
+For other inputs, use the examples under [Sources](#sources). Web pages also
+require the `web` profile shown there.
+
+### 3. Pull the image, sign in, and start
+
+For YouTube, HLS, or a local file:
 
 ```sh
-docker compose build
+docker compose pull streamer
 docker compose run --rm streamer auth
 docker compose up -d
 ```
 
 `auth` asks for your phone number, login code, and optional 2FA password. The code
-may arrive in an existing Telegram app. The saved session lives in the
-`telegram-state` volume and grants access to your account: **never share it**.
+may arrive in an existing Telegram app. You normally authenticate only once:
+the session is saved in the `telegram-state` Docker volume.
 
-**3. Verify the stream:**
+> [!WARNING]
+> The saved session grants access to your Telegram account. Never share it, and
+> never run more than **one publisher deployment per channel**.
+
+For a web page, authenticate with the same `auth` command, then follow the
+[web source startup commands](#web-pages-optional-browser-sidecar).
+
+### 4. Check that it is streaming
 
 ```sh
 docker compose exec streamer telegram-stream status
 docker compose logs -f --tail=100 streamer
 ```
 
-After startup, look for `"ready": true` and confirm the video appears in the
-channel's **story bar**. Run only **one publisher deployment per channel**.
-
-## Prebuilt Docker images
-
-Tagged releases publish **Linux AMD64** images to
-[GitHub Container Registry](https://github.com/ragnarok22/telegram-stream/pkgs/container/telegram-stream).
-For example, pushing `v1.2` publishes:
-
-| Image | Purpose |
-| --- | --- |
-| `ghcr.io/ragnarok22/telegram-stream:v1.2` | Main publisher (`runtime` target) |
-| `ghcr.io/ragnarok22/telegram-stream:v1.2-web` | Optional browser sidecar (`web` target) |
-| `ghcr.io/ragnarok22/telegram-stream:latest` | Most recently published main image |
-| `ghcr.io/ragnarok22/telegram-stream:web` | Most recently published browser image |
-
-### Use with Docker Compose
-
-Clone and configure the project as in step 1 above, then create
-`docker-compose.override.yml` beside `docker-compose.yml`:
-
-```yaml
-services:
-  streamer:
-    image: ghcr.io/ragnarok22/telegram-stream:v1.2
-  web:
-    image: ghcr.io/ragnarok22/telegram-stream:v1.2-web
-```
-
-Replace `v1.2` with an available release, keeping both images on the same version.
-Compose loads this override automatically, preserving the existing volumes,
-environment, and security settings. Instead of building locally:
-
-```sh
-docker compose pull streamer
-docker compose run --rm streamer auth
-docker compose up -d --no-build
-```
-
-For web capture, configure the [web source](#web-pages-optional-browser-sidecar),
-then pull and start both services:
-
-```sh
-docker compose --profile web pull
-docker compose --profile web up -d --no-build --wait
-```
-
-While using published images, use `pull` and `up --no-build`, not the `build` or
-`up --build` commands shown elsewhere in this guide. To upgrade, update both
-image tags in the override, pull again, and recreate with `up -d --no-build`
-(include `--profile web` for web capture). Keep the existing state volume.
-
-### Publish a release
-
-After the release commit passes CI and contains the publishing workflow, push a
-tag with two or three numeric components:
-
-```sh
-git tag v1.2.3
-git push origin v1.2.3
-```
-
-Tags such as `v0.1`, `v12.34`, and `v0.1.0` trigger publishing; `v1`, `v1.2.3.4`,
-and `v1.2-beta` do not. Image tags preserve the full version: `v0.1.0` publishes
-`v0.1.0` and `v0.1.0-web`, along with the `latest` and `web` aliases.
-The workflow uses the automatic `GITHUB_TOKEN` with
-`packages: write`; no additional registry secret is needed. The `latest` and
-`web` aliases follow publication order, not numerical version order.
-
-Tag pushes are not processed retroactively. If a tag was pushed before this
-filter was added, create a new version tag on a commit containing the updated
-workflow.
-
-After the first successful publication, open the package's settings in GitHub
-Packages and change its visibility to **Public** to allow unauthenticated pulls.
-
-## Sources
-
-Set these values in `.env`. Only restream material you have permission to
-distribute. `SOURCE_TYPE=auto` detects YouTube, other HTTP(S) media URLs, and local
-paths; web pages require explicit `web`.
-
-### YouTube Live
-
-```dotenv
-SOURCE_TYPE=youtube
-SOURCE=https://www.youtube.com/watch?v=YOUR_LIVE_VIDEO_ID
-```
-
-The video must currently be live; a channel's `/live` URL also works. YouTube
-may block datacenter IPs or require cookies/tokens. The service does not bypass
-those restrictions; see [yt-dlp's guidance](https://github.com/yt-dlp/yt-dlp/wiki/Extractors#youtube).
-
-For extension-free cookie capture, run this **on the computer with your browser**:
-
-```sh
-docker compose build streamer
-uv run --locked telegram-stream cookies capture --browser firefox --install
-```
-
-This asks for permission, exports only unexpired YouTube cookies, and installs
-them privately in the Docker volume over stdin. Leave `YOUTUBE_COOKIES_FILE`
-empty for managed cookies. It does not switch sources or interrupt a live stream.
-Use `--browser chrome` for Chrome, and optionally `--check-url "https://…"` to test
-a live YouTube source before replacing existing cookies.
-
-See [YouTube cookie capture and checks](docs/youtube-cookies.md) for profiles,
-local-file import, privacy, and troubleshooting.
-
-### HLS / M3U8
-
-```dotenv
-SOURCE_TYPE=hls
-SOURCE=https://example.com/live/playlist.m3u8
-```
-
-Prefer a stable HTTP(S) URL. Signed URLs stop working when their authorization
-expires; arbitrary HLS tokens are not automatically renewed.
-
-### Local files
-
-Place a readable video in `media/`:
-
-```dotenv
-SOURCE_TYPE=file
-SOURCE=/media/video.mp4
-```
-
-The file loops continuously. Missing audio becomes silence; playback starts
-from the beginning after a publisher restart.
-
-### Web pages (optional browser sidecar)
-
-```dotenv
-SOURCE_TYPE=web
-SOURCE=https://reinierhernandez.com
-VIDEO_WIDTH=720
-VIDEO_HEIGHT=1280
-```
-
-```sh
-docker compose --profile web up -d --build --wait
-```
-
-The sidecar captures the page in Chromium and supplies private HLS to the
-publisher. **Video only:** no website audio, automatic scrolling, clicks, or
-login. Animations and client-side updates continue running.
-
-Open only trusted pages: Chromium runs with `--no-sandbox` inside the isolated
-container. Never expose its HLS server or DevTools publicly. See
-[SECURITY.md](SECURITY.md) for isolation details.
-
-When switching back to another source, stop the sidecar with
-`docker compose --profile web stop web`, or use the source-aware `make up`
-command below. Disabling a Compose profile alone does not stop an existing sidecar.
+Look for `"ready": true` in the status output and confirm the video appears in
+the channel's **story bar**. Press `Ctrl+C` to leave the logs without stopping
+the stream. If it is not ready, see [Troubleshooting](#troubleshooting).
 
 ## Configuration
 
-See [`.env.example`](.env.example) for the complete reference. Common options:
+Docker Compose loads `.env` automatically. The five settings above are enough to
+start; [`.env.example`](.env.example) documents the remaining options.
 
 | Setting | Default | Purpose |
 | --- | --- | --- |
@@ -235,75 +123,138 @@ See [`.env.example`](.env.example) for the complete reference. Common options:
 | `LIVE_STORY_CAPTION` | empty | Optional caption; omitted if Telegram rejects it |
 | `END_LIVE_STORY_ON_SHUTDOWN` | `false` | End the owned story on graceful shutdown |
 
-Apply `.env` changes with `docker compose up -d` (include `--profile web` before
-`up` for web capture). `docker compose restart` does not reload environment
-settings. Native runs must export settings into the process environment.
+**After editing `.env`, run `docker compose up -d`.** For web capture, use
+`docker compose --profile web up -d --wait`. `docker compose restart` does not
+reload environment settings.
 
-### Resource controls
+### Choose an image version
 
-With [uv][uv] installed, use the source-aware deployment helper after changing
-the source or configuration:
+Compose uses the images already published to
+[GitHub Container Registry](https://github.com/ragnarok22/telegram-stream/pkgs/container/telegram-stream):
 
-```sh
-make up ARGS="--build"
+| Default image | Purpose |
+| --- | --- |
+| `ghcr.io/ragnarok22/telegram-stream:latest` | Main publisher |
+| `ghcr.io/ragnarok22/telegram-stream:web` | Optional browser sidecar |
+
+For a repeatable deployment, pin **both images to the same release** in `.env`.
+For example:
+
+```dotenv
+STREAMER_IMAGE=ghcr.io/ragnarok22/telegram-stream:v0.1.1
+WEB_IMAGE=ghcr.io/ragnarok22/telegram-stream:v0.1.1-web
 ```
 
-It validates the effective publisher and web configuration without printing
-credentials before changing services, waits for the web sidecar to become
-healthy when needed, and starts the publisher. It then requires a fresh
-heartbeat with both `healthy` and `ready` true; persisted status from an older
-publisher is not enough. For other source types, it stops an unused web sidecar
-only after that check succeeds. It does not force a publisher restart when
-the image and configuration are unchanged. The helper also accepts `-f`,
-`--env-file`, and `--project-name` through `ARGS`. Publisher readiness times out
-after 300 seconds by default; override it with `--ready-timeout SECONDS`.
+Use an available version from the registry, then [pull and recreate](#update-the-images).
+No Compose override file is needed.
 
-Compose limits each service to **2 CPUs and 2 GiB RAM** by default. Override
-`STREAMER_CPU_LIMIT`, `STREAMER_MEMORY_LIMIT`, `WEB_CPU_LIMIT`, or
-`WEB_MEMORY_LIMIT` for demanding workloads. These are guardrails, not reserved
-resources or performance guarantees: tight limits can cause stalls or OOM
-restarts. Measure after every change.
+## Sources
 
-For web sources:
+Set `SOURCE_TYPE` and `SOURCE` in `.env`, then recreate the services.
+Only restream material you have permission to distribute.
 
-- `WEB_QUEUE_SIZE=16` bounds the raw capture queue (allowed range: 1–64 frames).
-  Avoid large queues: full-resolution frames can retain several GiB of shared
-  memory.
-- `WEB_CAPTURE_FPS` defaults to `VIDEO_FPS`. Try `15` for slowly changing pages;
-  it cannot exceed output FPS. The encoder duplicates frames as needed to
-  preserve output FPS.
-- `WEB_CAPTURE_SCALE=2` preserves high-density rendering. Try `1` for lighter,
-  native-size capture; both modes respect Chromium's minimum viewport width.
-  Changing scale can also change the page's responsive layout and text rendering.
-- `WEB_VIDEO_COPY=false` keeps transcode as the default. Enable it only for the
-  compatible project sidecar to avoid a second video encode; incompatible or
-  unverifiable media still transcodes. Audio remains AAC, including silence
-  when the source has no audio. The `ffmpeg_started` log reports `video_mode`.
-  If a compatible copy still fails at runtime, disable the option; runtime
-  failures do not automatically switch encoders.
+### YouTube Live
 
-Compose forwards `VIDEO_FPS` and `VIDEO_BITRATE` to the sidecar. Native browser
-runs use `WEB_FPS` and `WEB_VIDEO_BITRATE` instead.
-
-YouTube selection is capped at 720p/30 FPS by default. Raise
-`YOUTUBE_MAX_HEIGHT`/`YOUTUBE_MAX_FPS` if the output needs more detail. These
-limits affect the input format, not the configured output size. Formats with
-unknown resolution or FPS are skipped rather than silently bypassing the caps.
-
-Measure a baseline and compare changes over 10–15 minutes:
-
-```sh
-make stats
-make stats ARGS="--duration 600 --interval 5"
+```dotenv
+SOURCE_TYPE=youtube
+SOURCE=https://www.youtube.com/watch?v=YOUR_LIVE_VIDEO_ID
 ```
 
-CPU uses **100% = one core**. Network rates are calculated from byte-counter
-deltas, not cumulative totals. Sampling requires cgroup v2 in the containers;
-gaps and restarts are excluded from rate summaries. Also check publisher
-readiness and the video in Telegram; low resource usage alone does not imply
-a healthy stream.
+The video must currently be live; a channel's `/live` URL also works. YouTube
+may block datacenter IPs or require cookies/tokens. The service does not bypass
+those restrictions. See [YouTube cookie capture and checks](docs/youtube-cookies.md)
+for optional host-browser capture, import, and troubleshooting.
 
-## Health, logs, and troubleshooting
+### HLS / M3U8
+
+```dotenv
+SOURCE_TYPE=hls
+SOURCE=https://example.com/live/playlist.m3u8
+```
+
+Prefer a stable HTTP(S) URL. Use explicit `hls` for extensionless manifests.
+Signed URLs stop working when their authorization expires; arbitrary HLS tokens
+are not automatically renewed.
+
+### Local files
+
+Place a readable video in the `media/` directory created during setup:
+
+```dotenv
+SOURCE_TYPE=file
+SOURCE=/media/video.mp4
+```
+
+Use the **container path** `/media/…`, not the host's absolute path. The file
+loops continuously. Missing audio becomes silence; playback starts from the
+beginning after a publisher restart.
+
+### Web pages (optional browser sidecar)
+
+```dotenv
+SOURCE_TYPE=web
+SOURCE=https://reinierhernandez.com
+VIDEO_WIDTH=720
+VIDEO_HEIGHT=1280
+```
+
+After authenticating, pull and start **both** services:
+
+```sh
+docker compose --profile web pull
+docker compose --profile web up -d --wait
+```
+
+The sidecar captures the page in Chromium and supplies private HLS to the
+publisher. **Video only:** no website audio, automatic scrolling, clicks, or
+login. Animations and client-side updates continue running.
+
+Open only trusted pages: Chromium runs with `--no-sandbox` inside the isolated
+container. Never expose its HLS server or DevTools publicly.
+
+When switching back to YouTube, HLS, or a file, apply your `.env` changes with
+`docker compose up -d`, then run `docker compose --profile web stop web`.
+Disabling a Compose profile alone does not stop an existing sidecar.
+
+## Everyday commands
+
+Run these from your installation directory:
+
+| Task | Command |
+| --- | --- |
+| Follow publisher logs | `docker compose logs -f --tail=100 streamer` |
+| Check stream readiness | `docker compose exec streamer telegram-stream status` |
+| List containers and health | `docker compose ps` |
+| Apply `.env` changes / start | `docker compose up -d` |
+| Apply changes with web capture | `docker compose --profile web up -d --wait` |
+| Stop all services, keeping saved state | `docker compose --profile web down` |
+
+**Never use `docker compose down -v` unless you intend to delete the saved
+credentials and recovery state.**
+
+### Update the images
+
+If you pinned a release, change both image tags in `.env` first. Otherwise,
+these commands fetch the current `latest` / `web` aliases.
+
+For YouTube, HLS, or local files:
+
+```sh
+docker compose pull streamer
+docker compose up -d
+```
+
+For web capture:
+
+```sh
+docker compose --profile web pull
+docker compose --profile web up -d --wait
+```
+
+Keep the same directory, Compose project name, and state volume so the saved
+session and recovery state are reused. You do not need to authenticate again.
+
+## Troubleshooting
 
 ```sh
 docker compose ps
@@ -315,7 +266,15 @@ docker compose logs --tail=100 streamer
 and recent Telegram confirmation. Monitor readiness as well as liveness.
 Docker does not restart a container solely because its healthcheck fails.
 
-To reauthenticate, stop the publisher first:
+| Symptom | Action |
+| --- | --- |
+| `CHAT_ADMIN_REQUIRED` / eligibility errors | Check user permissions and channel Live Story eligibility |
+| Another process owns `DATA_DIR` | Stop the other publisher/auth process; do not delete lock files |
+| Source retries / stalled video | Check source availability, access restrictions, upload bandwidth, and CPU |
+| Web source retries / no browser feed | Start the `web` profile, inspect `docker compose logs web`, and check the page loads |
+| `no matching manifest` on an ARM host | Use AMD64 emulation or build images locally |
+
+To reauthenticate, **stop the publisher first**:
 
 ```sh
 docker compose stop streamer
@@ -323,36 +282,65 @@ docker compose run --rm streamer auth
 docker compose up -d
 ```
 
-| Symptom | Action |
-| --- | --- |
-| `CHAT_ADMIN_REQUIRED` / eligibility errors | Check user permissions and channel Live Story eligibility |
-| Another process owns `DATA_DIR` | Stop the other publisher/auth process; do not delete lock files |
-| Source retries / stalled video | Check source availability, access restrictions, upload bandwidth, and CPU |
-| Web source retries / no browser feed | Start the `web` profile, inspect `docker compose logs web`, and check the page loads |
-
 Unknown active stories are not automatically taken over. Stop the service and
 verify the story in Telegram before deliberately using
 `ADOPT_EXISTING_LIVE_STORY=true`; reset it to `false` and recreate the publisher
 after recovery.
 
-## Linux / Proxmox deployment and security
+## Deployment, resources, and security
 
-- For Proxmox, prefer a Debian/Ubuntu VM with Docker. Start with 2–4 vCPUs and
-  2–4 GB RAM, then measure encoding load; browser capture needs extra resources.
-- Default containers run as UID/GID **10001** and publish no host ports. Allow
-  outbound DNS, HTTPS/MTProto, and Telegram's RTMP/RTMPS endpoint.
+- For Linux / Proxmox, prefer a Debian/Ubuntu VM with Docker. Start with
+  **2–4 vCPUs and 2–4 GB RAM**, then measure; browser capture needs extra resources.
+- Compose limits **each service to 2 CPUs and 2 GiB RAM** by default. See
+  [resource tuning and deployment helpers](docs/operations.md) for overrides,
+  lighter browser capture, and measurement.
+- Containers run as UID/GID **10001** and publish no host ports. Allow outbound
+  DNS, HTTPS/MTProto, and Telegram's RTMP/RTMPS endpoint.
 - Keep `.env`, cookies, sessions, and backups private. State volumes are not
   encrypted. Bind-mounted state directories must be private and writable by UID 10001.
-- Stop before backing up; restore the whole state volume. **`docker compose down -v`
-  destroys credentials and recovery state.**
+- Stop services before backing up; restore the whole state volume.
 
-See [SECURITY.md](SECURITY.md) for safeguards and private vulnerability reporting.
+See [SECURITY.md](SECURITY.md) for isolation details and private vulnerability reporting.
 
 ## Local development
 
-For native runs on Linux/macOS, install [uv][uv] and FFmpeg/ffprobe. Python 3.12+
-is supported; development is pinned to 3.14. Export the settings shown above
-using your shell, with a host path for local files (`.env` is not loaded):
+Only clone the repository if you want to develop, build images, or use the
+host-side Python helpers:
+
+```sh
+git clone https://github.com/ragnarok22/telegram-stream.git
+cd telegram-stream
+cp .env.example .env
+chmod 600 .env
+mkdir -p media
+```
+
+Configure `.env` as in the quick start.
+
+### Build Docker images locally
+
+Use the explicit build override instead of the published images:
+
+```sh
+docker compose -f docker-compose.yml -f docker-compose.build.yml build streamer
+docker compose -f docker-compose.yml -f docker-compose.build.yml run --rm streamer auth
+docker compose -f docker-compose.yml -f docker-compose.build.yml up -d
+```
+
+For web capture, build and start both targets:
+
+```sh
+docker compose -f docker-compose.yml -f docker-compose.build.yml --profile web up -d --build --wait
+```
+
+Keep using both `-f` arguments for subsequent commands on a locally built
+deployment. To use published images again, omit the build override and pull them.
+
+### Run without Docker
+
+Install [uv][uv] and FFmpeg/ffprobe. Python 3.12+ is supported; development is
+pinned to 3.14. Export your settings into the process environment using your
+shell, with a host path for local files. **Native runs do not load `.env`.**
 
 ```sh
 uv python install
@@ -365,6 +353,8 @@ Local browser capture additionally needs Chromium/Xvfb. Run
 `uv run --locked --group browser python -m telegram_stream.web` with `PAGE_URL`
 and optional `WEB_WIDTH`/`WEB_HEIGHT`/`WEB_FPS`; set `WEB_STREAM_URL` on the
 publisher to the sidecar's reachable HLS URL.
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for checks and publishing release images.
 
 ## Acknowledgments
 

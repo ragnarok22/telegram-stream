@@ -6,14 +6,17 @@ recommended. Native extraction does not capture private/incognito sessions.
 
 ## Capture and install
 
-From the project root:
+Capture needs a repository checkout and [uv](https://docs.astral.sh/uv/) on the
+computer with your signed-in browser. The two-file Docker installation alone
+does not include this host-side command. Run from the project root, using the
+same Compose project and state volume as your publisher:
 
 ```sh
-docker compose build streamer
+docker compose pull streamer
 uv run --locked telegram-stream cookies capture --browser firefox --install
 ```
 
-Building the updated helper image does not restart an existing publisher.
+Pulling the helper image does not restart an existing publisher.
 Capture runs on the host with your browser, asks for confirmation, and never
 asks for your Google password. macOS may separately request Keychain access.
 

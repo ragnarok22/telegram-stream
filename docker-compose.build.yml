@@ -1,0 +1,12 @@
+services:
+  streamer:
+    build:
+      context: .
+      target: runtime
+    image: telegram-stream:local
+
+  web:
+    build:
+      context: .
+      target: web
+    image: telegram-stream:web
