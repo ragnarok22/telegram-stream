@@ -20,7 +20,7 @@ from urllib.request import ProxyHandler, build_opener
 
 from websockets.asyncio.client import connect
 
-from telegram_stream.config import _number
+from telegram_stream.config import _bitrate, _number
 from telegram_stream.errors import FatalError, TemporaryError
 from telegram_stream.logging import configure, event, redactor
 from telegram_stream.process import spawn, terminate
@@ -36,6 +36,10 @@ class WebSettings:
     height: int = 1280
     fps: int = 30
     timeout: int = 60
+    queue_size: int = 16
+    video_bitrate: int = 2_500_000
+    capture_fps: int | None = None
+    capture_scale: int = 2
 
     @classmethod
     def from_env(cls) -> Self:
@@ -43,22 +47,35 @@ class WebSettings:
         parsed = urlsplit(url)
         if parsed.scheme not in {"http", "https"} or not parsed.hostname:
             raise FatalError("PAGE_URL must be an HTTP or HTTPS page")
+        fps = _number(os.environ, "WEB_FPS", 30, 1, 60)
         settings = cls(
             url=url,
             width=_number(os.environ, "WEB_WIDTH", 720, 128, 4096),
             height=_number(os.environ, "WEB_HEIGHT", 1280, 128, 4096),
-            fps=_number(os.environ, "WEB_FPS", 30, 1, 60),
+            fps=fps,
             timeout=_number(os.environ, "WEB_READY_TIMEOUT", 60, 10, 300),
+            queue_size=_number(os.environ, "WEB_QUEUE_SIZE", 16, 1, 64),
+            video_bitrate=_bitrate(
+                os.environ.get("WEB_VIDEO_BITRATE", "2500k"), "WEB_VIDEO_BITRATE"
+            ),
+            capture_fps=_number(os.environ, "WEB_CAPTURE_FPS", fps, 1, 60),
+            capture_scale=_number(os.environ, "WEB_CAPTURE_SCALE", 2, 1, 2),
         )
+        if settings.effective_capture_fps > settings.fps:
+            raise FatalError("WEB_CAPTURE_FPS must not exceed WEB_FPS")
         if settings.width % 2 or settings.height % 2 or settings.capture_height > 8192:
             raise FatalError("Web capture requires even dimensions and a reasonable aspect ratio")
         return settings
 
     @property
+    def effective_capture_fps(self) -> int:
+        return self.fps if self.capture_fps is None else self.capture_fps
+
+    @property
     def capture_width(self) -> int:
-        # Chrome has a minimum window width near 500 CSS pixels. Render at 2x
-        # with at least a 540px CSS viewport, then scale down in the encoder.
-        return max(1080, self.width)
+        # Keep Chrome above its minimum CSS window width, including at native 1x.
+        # The default 2x preserves the existing supersampled capture geometry.
+        return max(540 * self.capture_scale, self.width)
 
     @property
     def capture_height(self) -> int:
@@ -80,8 +97,9 @@ def chromium_command(settings: WebSettings) -> list[str]:
         "--disable-background-timer-throttling",
         "--disable-backgrounding-occluded-windows",
         "--disable-features=Translate,TranslateUI",
-        "--force-device-scale-factor=2",
-        f"--window-size={settings.capture_width // 2},{settings.capture_height // 2}",
+        f"--force-device-scale-factor={settings.capture_scale}",
+        f"--window-size={settings.capture_width // settings.capture_scale},"
+        f"{settings.capture_height // settings.capture_scale}",
         "--window-position=0,0",
         "--mute-audio",
         "--user-data-dir=/tmp/chromium-profile",
@@ -99,7 +117,7 @@ def capture_command(settings: WebSettings, directory: Path) -> list[str]:
         "-loglevel",
         "warning",
         "-thread_queue_size",
-        "512",
+        str(settings.queue_size),
         "-f",
         "x11grab",
         "-draw_mouse",
@@ -107,19 +125,28 @@ def capture_command(settings: WebSettings, directory: Path) -> list[str]:
         "-video_size",
         f"{settings.capture_width}x{settings.capture_height}",
         "-framerate",
-        str(settings.fps),
+        str(settings.effective_capture_fps),
         "-i",
         ":99.0",
         "-vf",
-        f"scale={settings.width}:{settings.height},setsar=1",
+        (
+            f"scale={settings.width}:{settings.height},setsar=1"
+            + (f",fps={settings.fps}" if settings.effective_capture_fps < settings.fps else "")
+        ),
         "-c:v",
         "libx264",
         "-preset",
         "ultrafast",
         "-tune",
         "zerolatency",
-        "-crf",
-        "23",
+        "-profile:v",
+        "main",
+        "-b:v",
+        str(settings.video_bitrate),
+        "-maxrate",
+        str(settings.video_bitrate),
+        "-bufsize",
+        str(settings.video_bitrate * 2),
         "-pix_fmt",
         "yuv420p",
         "-g",
@@ -218,6 +245,23 @@ class WebCapture:
             and len(self.processes) == 3
             and all(process.returncode is None for process in self.processes)
         )
+
+    def stream_info(self) -> dict[str, object]:
+        """Describe only the controlled encoder contract, never page configuration."""
+        return {
+            "version": 1,
+            "ready": self.healthy,
+            "codec": "h264",
+            "profile": "main",
+            "pix_fmt": "yuv420p",
+            "width": self.settings.width,
+            "height": self.settings.height,
+            "fps": self.settings.fps,
+            "sample_aspect_ratio": "1:1",
+            "video_bitrate": self.settings.video_bitrate,
+            "maxrate": self.settings.video_bitrate,
+            "gop": self.settings.fps,
+        }
 
     async def _spawn(self, command: list[str]) -> None:
         process = await spawn(
@@ -323,6 +367,15 @@ class StreamHandler(SimpleHTTPRequestHandler):
         if path == "/health":
             self.send_response(200 if self.capture.healthy else 503)
             self.end_headers()
+            return
+        if path == "/stream-info":
+            info = self.capture.stream_info()
+            body = json.dumps(info).encode()
+            self.send_response(200 if info["ready"] else 503)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
             return
         if path != "/index.m3u8" and not re.fullmatch(r"/segment\d+\.ts", path):
             self.send_error(404)

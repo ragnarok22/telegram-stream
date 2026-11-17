@@ -1,11 +1,15 @@
 """Resolve fresh input URLs and inspect media without blocking the event loop."""
 
+import asyncio
 import json
 import re
 import tempfile
 from dataclasses import dataclass, field
+from fractions import Fraction
+from http.client import HTTPException
 from pathlib import Path
 from urllib.parse import urlsplit
+from urllib.request import HTTPHandler, HTTPSHandler, OpenerDirector, Request
 
 from telegram_stream.config import Settings
 from telegram_stream.cookies import (
@@ -55,6 +59,162 @@ class ResolvedSource:
     video_index: int
     audio_index: int | None
     local: bool = False
+    video_copy: bool = False
+
+
+def _positive_integer(value: object) -> int | None:
+    if type(value) is int:
+        return value if value > 0 else None
+    if isinstance(value, str) and re.fullmatch(r"[0-9]{1,12}", value):
+        number = int(value)
+        return number if number > 0 else None
+    return None
+
+
+def _ratio(value: object) -> Fraction | None:
+    if not isinstance(value, str) or not re.fullmatch(r"[0-9]{1,10}[/:][0-9]{1,10}", value):
+        return None
+    try:
+        return Fraction(value.replace(":", "/"))
+    except (ValueError, ZeroDivisionError):
+        return None
+
+
+def _copy_bitrate_compatible(stream: dict[str, object], limit: int) -> bool:
+    for name in ("bit_rate", "max_bit_rate"):
+        value = stream.get(name)
+        # MPEG-TS/HLS commonly omits these; the sidecar contract must bound VBV.
+        if type(value) is bool:
+            return False
+        if value not in (None, "N/A", "0", 0):
+            bitrate = _positive_integer(value)
+            if bitrate is None or bitrate > limit:
+                return False
+    return True
+
+
+def _copy_video_compatible(settings: Settings, stream: dict[str, object]) -> bool:
+    """Only accept the first mapped video stream, never container/URL hints."""
+    field_order = stream.get("field_order")
+    if field_order is None and stream.get("profile") in ("Baseline", "Constrained Baseline"):
+        # Baseline cannot use interlaced coding; HLS often omits field_order.
+        field_order = "progressive"
+    if (
+        stream.get("codec_name") != "h264"
+        or stream.get("width") != settings.width
+        or stream.get("height") != settings.height
+        or stream.get("pix_fmt") != "yuv420p"
+        or stream.get("profile") not in ("Baseline", "Constrained Baseline", "Main")
+        or field_order != "progressive"
+        or _ratio(stream.get("sample_aspect_ratio")) != 1
+        or _ratio(stream.get("r_frame_rate")) != settings.fps
+        or _ratio(stream.get("avg_frame_rate")) != settings.fps
+    ):
+        return False
+    # H.264 levels through 4.2: max frame size and macroblocks/second.
+    limits = {
+        10: (99, 1485),
+        11: (396, 3000),
+        12: (396, 6000),
+        13: (396, 11880),
+        20: (396, 11880),
+        21: (792, 19800),
+        22: (1620, 20250),
+        30: (1620, 40500),
+        31: (3600, 108000),
+        32: (5120, 216000),
+        40: (8192, 245760),
+        41: (8192, 245760),
+        42: (8704, 522240),
+    }
+    level = _positive_integer(stream.get("level"))
+    if level is None or level not in limits:
+        return False
+    max_frame, max_rate = limits[level]
+    macroblocks = ((settings.width + 15) // 16) * ((settings.height + 15) // 16)
+    if macroblocks > max_frame or macroblocks * settings.fps > max_rate:
+        return False
+    if not _copy_bitrate_compatible(stream, settings.video_bitrate):
+        return False
+    tags = stream.get("tags", {})
+    side_data = stream.get("side_data_list", [])
+    if not isinstance(tags, dict) or not isinstance(side_data, list):
+        return False
+    rotations = [tags.get("rotate", "0")]
+    for item in side_data:
+        if not isinstance(item, dict):
+            return False
+        rotations.append(item.get("rotation", 0))
+    # Stream copy cannot apply FFmpeg's automatic display-matrix rotation.
+    return all(str(rotation) in {"0", "0.0", "-0", "-0.0"} for rotation in rotations)
+
+
+def _read_web_copy_contract(location: str, timeout: int) -> object:
+    """Read bounded, uncached metadata directly, without proxies or redirects."""
+    endpoint = urlsplit(location)
+    if endpoint.scheme not in {"http", "https"} or not endpoint.hostname or endpoint.username:
+        return None
+    endpoint = endpoint._replace(path="/stream-info", fragment="")
+    opener = OpenerDirector()
+    opener.add_handler(HTTPHandler())
+    opener.add_handler(HTTPSHandler())
+    request = Request(
+        endpoint.geturl(), headers={"Accept": "application/json", "Cache-Control": "no-cache"}
+    )
+    try:
+        with opener.open(request, timeout=timeout) as response:
+            if response.status != 200:
+                return None
+            payload = response.read(4097)
+        if len(payload) > 4096:
+            return None
+        info = json.loads(payload)
+        return info if isinstance(info, dict) else None
+    except (OSError, ValueError, HTTPException, RecursionError):
+        return None
+
+
+def _copy_contract_compatible(settings: Settings, info: object, stream: dict[str, object]) -> bool:
+    """Version 1 describes the controlled sidecar's bounded x264 encoder."""
+    if not isinstance(info, dict):
+        return False
+    if (
+        type(info.get("version")) is not int
+        or info["version"] != 1
+        or info.get("ready") is not True
+        or info.get("codec") != "h264"
+        or info.get("profile") != "main"
+        or info.get("pix_fmt") != "yuv420p"
+        or _ratio(info.get("sample_aspect_ratio")) != 1
+    ):
+        return False
+    for name, expected in (
+        ("width", settings.width),
+        ("height", settings.height),
+        ("fps", settings.fps),
+    ):
+        if type(info.get(name)) is not int or info[name] != expected:
+            return False
+    bitrate = info.get("video_bitrate")
+    maxrate = info.get("maxrate")
+    gop = info.get("gop")
+    return (
+        type(bitrate) is int
+        and 0 < bitrate <= settings.video_bitrate
+        and type(maxrate) is int
+        and maxrate == bitrate
+        and _copy_bitrate_compatible(stream, maxrate)
+        and type(gop) is int
+        and 0 < gop <= settings.fps * 2
+    )
+
+
+def _youtube_format_selector(max_height: int, max_fps: int) -> str:
+    # Do not use yt-dlp's <=? comparisons: missing height/FPS cannot prove that
+    # a format fits the input budget. Every video fallback must keep both caps.
+    limits = f"[height<={max_height}][fps<={max_fps}]"
+    combined = "best[vcodec!=none][acodec!=none]"
+    return f"{combined}[protocol^=m3u8]{limits}/{combined}{limits}/bestvideo{limits}+bestaudio"
 
 
 class SourceResolver:
@@ -74,7 +234,9 @@ class SourceResolver:
             "--js-runtimes",
             "deno",
             "--format",
-            "best[protocol^=m3u8]/best[vcodec!=none][acodec!=none]/bestvideo+bestaudio",
+            _youtube_format_selector(
+                self.settings.youtube_max_height, self.settings.youtube_max_fps
+            ),
         ]
         if self.settings.extractor_args:
             command += ["--extractor-args", self.settings.extractor_args]
@@ -112,6 +274,7 @@ class SourceResolver:
 
     async def resolve(self) -> ResolvedSource:
         local = self.settings.kind == "file"
+        copy_requested = self.settings.kind == "web" and self.settings.web_video_copy
         if self.settings.kind == "youtube":
             inputs = await self._youtube()
         elif local:
@@ -127,6 +290,14 @@ class SourceResolver:
             inputs = (MediaInput(self.settings.source),)
         video_index = None
         audio_index = None
+        video_metadata: dict[str, object] = {}
+        entries = "stream=codec_type"
+        if copy_requested:
+            entries += (
+                ",codec_name,width,height,pix_fmt,profile,level,field_order,"
+                "sample_aspect_ratio,r_frame_rate,avg_frame_rate,bit_rate,max_bit_rate"
+                ":stream_tags=rotate:stream_side_data=rotation"
+            )
         for index, media in enumerate(inputs):
             # URLs are redacted generically; do not retain every expiring URL forever.
             redactor.add(*media.headers.values())
@@ -137,7 +308,7 @@ class SourceResolver:
                     "error",
                     *media.options(self.settings.rpc_timeout),
                     "-show_entries",
-                    "stream=codec_type",
+                    entries,
                     "-of",
                     "json",
                     "-i",
@@ -146,13 +317,33 @@ class SourceResolver:
                 self.settings.source_timeout,
             )
             try:
-                streams = {stream["codec_type"] for stream in json.loads(output)["streams"]}
+                metadata = json.loads(output)["streams"]
+                if not isinstance(metadata, list) or any(
+                    not isinstance(stream, dict) or not isinstance(stream.get("codec_type"), str)
+                    for stream in metadata
+                ):
+                    raise ValueError
+                streams = {stream["codec_type"] for stream in metadata}
             except (ValueError, KeyError, TypeError):
                 raise TemporaryError("Invalid ffprobe media metadata") from None
             if "video" in streams and video_index is None:
                 video_index = index
+                video_metadata = next(
+                    stream for stream in metadata if stream["codec_type"] == "video"
+                )
             if "audio" in streams and audio_index is None:
                 audio_index = index
         if video_index is None:
             raise TemporaryError("Source has no video stream")
-        return ResolvedSource(inputs, video_index, audio_index, local)
+        video_copy = False
+        if copy_requested and _copy_video_compatible(self.settings, video_metadata):
+            try:
+                timeout = min(3, self.settings.rpc_timeout)
+                async with asyncio.timeout(timeout):
+                    info = await asyncio.to_thread(
+                        _read_web_copy_contract, self.settings.web_stream_url, timeout
+                    )
+                video_copy = _copy_contract_compatible(self.settings, info, video_metadata)
+            except (OSError, TimeoutError):
+                pass
+        return ResolvedSource(inputs, video_index, audio_index, local, video_copy=video_copy)

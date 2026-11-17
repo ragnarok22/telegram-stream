@@ -1,6 +1,6 @@
 .DEFAULT_GOAL := check
 
-.PHONY: setup format format-check lint typecheck test check build docker-build docker-dev
+.PHONY: setup format format-check lint typecheck test check build docker-build docker-dev up stats
 
 setup:
 	uv sync --locked
@@ -30,3 +30,9 @@ docker-build:
 
 docker-dev:
 	docker build --target development --tag telegram-stream:dev .
+
+up:
+	uv run --locked python scripts/compose_up.py $(ARGS)
+
+stats:
+	uv run --locked python scripts/resource_stats.py $(ARGS)

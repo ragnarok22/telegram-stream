@@ -6,6 +6,8 @@ services:
     image: telegram-stream:local
     init: true
     restart: unless-stopped
+    cpus: ${STREAMER_CPU_LIMIT:-2.0}
+    mem_limit: ${STREAMER_MEMORY_LIMIT:-2g}
     env_file:
       - .env
     environment:
@@ -41,12 +43,18 @@ services:
     image: telegram-stream:web
     init: true
     restart: unless-stopped
+    cpus: ${WEB_CPU_LIMIT:-2.0}
+    mem_limit: ${WEB_MEMORY_LIMIT:-2g}
     # Deliberately do not pass .env, Telegram credentials, or session volumes.
     environment:
       PAGE_URL: ${WEB_PAGE_URL:-${SOURCE}}
       WEB_WIDTH: ${VIDEO_WIDTH:-1280}
       WEB_HEIGHT: ${VIDEO_HEIGHT:-720}
       WEB_FPS: ${VIDEO_FPS:-30}
+      WEB_CAPTURE_FPS: ${WEB_CAPTURE_FPS:-${VIDEO_FPS:-30}}
+      WEB_CAPTURE_SCALE: ${WEB_CAPTURE_SCALE:-2}
+      WEB_QUEUE_SIZE: ${WEB_QUEUE_SIZE:-16}
+      WEB_VIDEO_BITRATE: ${VIDEO_BITRATE:-2500k}
       WEB_READY_TIMEOUT: ${SOURCE_TIMEOUT:-60}
     read_only: true
     tmpfs:

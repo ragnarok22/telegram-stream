@@ -67,6 +67,9 @@ class Settings:
     cookies_file: Path | None = field(default=None, repr=False)
     extractor_args: str = field(default="", repr=False)
     web_stream_url: str = field(default="http://web:8080/index.m3u8", repr=False)
+    youtube_max_height: int = 720
+    youtube_max_fps: int = 30
+    web_video_copy: bool = False
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None, *, require_stream: bool = True) -> Self:
@@ -110,6 +113,9 @@ class Settings:
             ),
             extractor_args=env.get("YOUTUBE_EXTRACTOR_ARGS", ""),
             web_stream_url=env.get("WEB_STREAM_URL", "http://web:8080/index.m3u8"),
+            youtube_max_height=_number(env, "YOUTUBE_MAX_HEIGHT", 720, 128, 4320),
+            youtube_max_fps=_number(env, "YOUTUBE_MAX_FPS", 30, 1, 120),
+            web_video_copy=_boolean(env, "WEB_VIDEO_COPY"),
         )
         if settings.width % 2 or settings.height % 2:
             raise FatalError("VIDEO_WIDTH and VIDEO_HEIGHT must be even")

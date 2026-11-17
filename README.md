@@ -120,17 +120,23 @@ image tags in the override, pull again, and recreate with `up -d --no-build`
 ### Publish a release
 
 After the release commit passes CI and contains the publishing workflow, push a
-tag with exactly two numeric components:
+tag with two or three numeric components:
 
 ```sh
-git tag v1.2
-git push origin v1.2
+git tag v1.2.3
+git push origin v1.2.3
 ```
 
-Only tags such as `v0.1` or `v12.34` trigger publishing; `v1`, `v1.2.3`, and
-`v1.2-beta` do not. The workflow uses the automatic `GITHUB_TOKEN` with
+Tags such as `v0.1`, `v12.34`, and `v0.1.0` trigger publishing; `v1`, `v1.2.3.4`,
+and `v1.2-beta` do not. Image tags preserve the full version: `v0.1.0` publishes
+`v0.1.0` and `v0.1.0-web`, along with the `latest` and `web` aliases.
+The workflow uses the automatic `GITHUB_TOKEN` with
 `packages: write`; no additional registry secret is needed. The `latest` and
 `web` aliases follow publication order, not numerical version order.
+
+Tag pushes are not processed retroactively. If a tag was pushed before this
+filter was added, create a new version tag on a commit containing the updated
+workflow.
 
 After the first successful publication, open the package's settings in GitHub
 Packages and change its visibility to **Public** to allow unauthenticated pulls.
@@ -212,7 +218,8 @@ container. Never expose its HLS server or DevTools publicly. See
 [SECURITY.md](SECURITY.md) for isolation details.
 
 When switching back to another source, stop the sidecar with
-`docker compose --profile web stop web`.
+`docker compose --profile web stop web`, or use the source-aware `make up`
+command below. Disabling a Compose profile alone does not stop an existing sidecar.
 
 ## Configuration
 
@@ -224,12 +231,74 @@ See [`.env.example`](.env.example) for the complete reference. Common options:
 | `VIDEO_FPS` | `30` | Constant output frame rate |
 | `VIDEO_BITRATE`, `AUDIO_BITRATE` | `2500k`, `128k` | H.264 / AAC bitrate |
 | `ENCODER_PRESET` | `veryfast` | CPU/quality trade-off |
+| `YOUTUBE_MAX_HEIGHT`, `YOUTUBE_MAX_FPS` | `720`, `30` | Limit input quality before downloading and decoding |
 | `LIVE_STORY_CAPTION` | empty | Optional caption; omitted if Telegram rejects it |
 | `END_LIVE_STORY_ON_SHUTDOWN` | `false` | End the owned story on graceful shutdown |
 
 Apply `.env` changes with `docker compose up -d` (include `--profile web` before
 `up` for web capture). `docker compose restart` does not reload environment
 settings. Native runs must export settings into the process environment.
+
+### Resource controls
+
+With [uv][uv] installed, use the source-aware deployment helper after changing
+the source or configuration:
+
+```sh
+make up ARGS="--build"
+```
+
+It reads the effective Compose configuration without printing credentials,
+waits for the web sidecar to become healthy when needed, and starts the
+publisher. For other source types, it stops an unused web sidecar only after
+the publisher starts successfully. It does not force a publisher restart when
+the image and configuration are unchanged. The helper also accepts `-f`,
+`--env-file`, and `--project-name` through `ARGS`.
+
+Compose limits each service to **2 CPUs and 2 GiB RAM** by default. Override
+`STREAMER_CPU_LIMIT`, `STREAMER_MEMORY_LIMIT`, `WEB_CPU_LIMIT`, or
+`WEB_MEMORY_LIMIT` for demanding workloads. These are guardrails, not reserved
+resources or performance guarantees: tight limits can cause stalls or OOM
+restarts. Measure after every change.
+
+For web sources:
+
+- `WEB_QUEUE_SIZE=16` bounds the raw capture queue (allowed range: 1–64 frames).
+  Avoid large queues: full-resolution frames can retain several GiB of shared
+  memory.
+- `WEB_CAPTURE_FPS` defaults to `VIDEO_FPS`. Try `15` for slowly changing pages;
+  it cannot exceed output FPS. The encoder duplicates frames as needed to
+  preserve output FPS.
+- `WEB_CAPTURE_SCALE=2` preserves high-density rendering. Try `1` for lighter,
+  native-size capture; both modes respect Chromium's minimum viewport width.
+  Changing scale can also change the page's responsive layout and text rendering.
+- `WEB_VIDEO_COPY=false` keeps transcode as the default. Enable it only for the
+  compatible project sidecar to avoid a second video encode; incompatible or
+  unverifiable media still transcodes. Audio remains AAC, including silence
+  when the source has no audio. The `ffmpeg_started` log reports `video_mode`.
+  If a compatible copy still fails at runtime, disable the option; runtime
+  failures do not automatically switch encoders.
+
+Compose forwards `VIDEO_FPS` and `VIDEO_BITRATE` to the sidecar. Native browser
+runs use `WEB_FPS` and `WEB_VIDEO_BITRATE` instead.
+
+YouTube selection is capped at 720p/30 FPS by default. Raise
+`YOUTUBE_MAX_HEIGHT`/`YOUTUBE_MAX_FPS` if the output needs more detail. These
+limits affect the input format, not the configured output size. Formats with
+unknown resolution or FPS are skipped rather than silently bypassing the caps.
+
+Measure a baseline and compare changes over 10–15 minutes:
+
+```sh
+make stats
+make stats ARGS="--duration 600 --interval 5"
+```
+
+CPU uses **100% = one core**. Network rates are calculated from byte-counter
+deltas, not cumulative totals. Sampling requires cgroup v2 in the containers;
+gaps and restarts are excluded from rate summaries. Also check publisher
+readiness and the video in Telegram; low resource usage alone does not imply
+a healthy stream.
 
 ## Health, logs, and troubleshooting
 

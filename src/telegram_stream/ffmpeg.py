@@ -27,41 +27,53 @@ def build_command(settings: Settings, source: ResolvedSource, destination: str) 
     if audio_index is None:
         audio_index = len(source.inputs)
         command += ["-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=44100"]
-    video_filter = (
-        f"scale={settings.width}:{settings.height}:force_original_aspect_ratio=decrease"
-        ":force_divisible_by=2,"
-        f"pad={settings.width}:{settings.height}:(ow-iw)/2:(oh-ih)/2,"
-        f"setsar=1,fps={settings.fps}"
-    )
     command += [
         "-map",
         f"{source.video_index}:v:0",
         "-map",
         f"{audio_index}:a:0",
-        "-vf",
-        video_filter,
+    ]
+    if (
+        settings.kind == "web"
+        and settings.web_video_copy
+        and source.video_copy
+        and not source.local
+    ):
+        command += ["-c:v", "copy"]
+    else:
+        video_filter = (
+            f"scale={settings.width}:{settings.height}:force_original_aspect_ratio=decrease"
+            ":force_divisible_by=2,"
+            f"pad={settings.width}:{settings.height}:(ow-iw)/2:(oh-ih)/2,"
+            f"setsar=1,fps={settings.fps}"
+        )
+        command += [
+            "-vf",
+            video_filter,
+            "-c:v",
+            "libx264",
+            "-preset",
+            settings.preset,
+            "-pix_fmt",
+            "yuv420p",
+            "-profile:v",
+            "main",
+            "-b:v",
+            str(settings.video_bitrate),
+            "-maxrate",
+            str(settings.video_bitrate),
+            "-bufsize",
+            str(settings.video_bitrate * 2),
+            "-g",
+            str(settings.fps * 2),
+            "-keyint_min",
+            str(settings.fps * 2),
+            "-sc_threshold",
+            "0",
+        ]
+    command += [
         "-af",
         "aresample=async=1:first_pts=0",
-        "-c:v",
-        "libx264",
-        "-preset",
-        settings.preset,
-        "-pix_fmt",
-        "yuv420p",
-        "-profile:v",
-        "main",
-        "-b:v",
-        str(settings.video_bitrate),
-        "-maxrate",
-        str(settings.video_bitrate),
-        "-bufsize",
-        str(settings.video_bitrate * 2),
-        "-g",
-        str(settings.fps * 2),
-        "-keyint_min",
-        str(settings.fps * 2),
-        "-sc_threshold",
-        "0",
         "-c:a",
         "aac",
         "-b:a",
@@ -97,8 +109,9 @@ class FFmpeg:
     async def start(self, source: ResolvedSource, destination: str) -> None:
         if self.process is not None:
             raise RuntimeError("FFmpeg must be stopped before starting another publisher")
+        command = build_command(self.settings, source, destination)
         try:
-            self.process = await spawn(build_command(self.settings, source, destination))
+            self.process = await spawn(command)
         except FileNotFoundError:
             raise TemporaryError("FFmpeg executable is not installed") from None
         self.started_at = time.monotonic()
@@ -109,7 +122,12 @@ class FFmpeg:
             asyncio.create_task(self._progress()),
             asyncio.create_task(self._stderr()),
         ]
-        event(logger, "ffmpeg_started", pid=self.process.pid)
+        event(
+            logger,
+            "ffmpeg_started",
+            pid=self.process.pid,
+            video_mode="copy" if command[command.index("-c:v") + 1] == "copy" else "transcode",
+        )
 
     async def _progress(self) -> None:
         assert self.process is not None and self.process.stdout is not None
