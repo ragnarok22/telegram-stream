@@ -1,6 +1,6 @@
 [project]
 name = "telegram-stream"
-version = "0.1.0"
+version = "0.1.1"
 description = "Recoverable, continuous RTMP publishing to Telegram Live Stories."
 readme = "README.md"
 authors = [
