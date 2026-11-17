@@ -68,6 +68,73 @@ docker compose logs -f --tail=100 streamer
 After startup, look for `"ready": true` and confirm the video appears in the
 channel's **story bar**. Run only **one publisher deployment per channel**.
 
+## Prebuilt Docker images
+
+Tagged releases publish **Linux AMD64** images to
+[GitHub Container Registry](https://github.com/ragnarok22/telegram-stream/pkgs/container/telegram-stream).
+For example, pushing `v1.2` publishes:
+
+| Image | Purpose |
+| --- | --- |
+| `ghcr.io/ragnarok22/telegram-stream:v1.2` | Main publisher (`runtime` target) |
+| `ghcr.io/ragnarok22/telegram-stream:v1.2-web` | Optional browser sidecar (`web` target) |
+| `ghcr.io/ragnarok22/telegram-stream:latest` | Most recently published main image |
+| `ghcr.io/ragnarok22/telegram-stream:web` | Most recently published browser image |
+
+### Use with Docker Compose
+
+Clone and configure the project as in step 1 above, then create
+`docker-compose.override.yml` beside `docker-compose.yml`:
+
+```yaml
+services:
+  streamer:
+    image: ghcr.io/ragnarok22/telegram-stream:v1.2
+  web:
+    image: ghcr.io/ragnarok22/telegram-stream:v1.2-web
+```
+
+Replace `v1.2` with an available release, keeping both images on the same version.
+Compose loads this override automatically, preserving the existing volumes,
+environment, and security settings. Instead of building locally:
+
+```sh
+docker compose pull streamer
+docker compose run --rm streamer auth
+docker compose up -d --no-build
+```
+
+For web capture, configure the [web source](#web-pages-optional-browser-sidecar),
+then pull and start both services:
+
+```sh
+docker compose --profile web pull
+docker compose --profile web up -d --no-build --wait
+```
+
+While using published images, use `pull` and `up --no-build`, not the `build` or
+`up --build` commands shown elsewhere in this guide. To upgrade, update both
+image tags in the override, pull again, and recreate with `up -d --no-build`
+(include `--profile web` for web capture). Keep the existing state volume.
+
+### Publish a release
+
+After the release commit passes CI and contains the publishing workflow, push a
+tag with exactly two numeric components:
+
+```sh
+git tag v1.2
+git push origin v1.2
+```
+
+Only tags such as `v0.1` or `v12.34` trigger publishing; `v1`, `v1.2.3`, and
+`v1.2-beta` do not. The workflow uses the automatic `GITHUB_TOKEN` with
+`packages: write`; no additional registry secret is needed. The `latest` and
+`web` aliases follow publication order, not numerical version order.
+
+After the first successful publication, open the package's settings in GitHub
+Packages and change its visibility to **Public** to allow unauthenticated pulls.
+
 ## Sources
 
 Set these values in `.env`. Only restream material you have permission to
