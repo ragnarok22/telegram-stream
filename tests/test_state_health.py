@@ -42,6 +42,22 @@ def test_health_is_independent_of_telegram_and_checks_staleness(tmp_path: Path) 
     assert not read_status(tmp_path)["healthy"]
 
 
+@pytest.mark.parametrize(("phase", "age"), [("running", 181), ("stopped", 0), ("fatal", 0)])
+def test_unhealthy_status_cannot_remain_ready(tmp_path: Path, phase: str, age: int) -> None:
+    atomic_json(
+        tmp_path / "health.json",
+        {
+            "phase": phase,
+            "ready": True,
+            "last_tick": time.time() - age,
+            "watchdog_timeout": 180,
+        },
+    )
+    status = read_status(tmp_path)
+    assert status["healthy"] is False
+    assert status["ready"] is False
+
+
 def test_logs_are_valid_json_and_redact_nested_secrets() -> None:
     redactor.add("test-secret-key")
     record = logging.LogRecord("test", logging.INFO, "", 0, "source_retry", (), None)

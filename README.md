@@ -248,12 +248,15 @@ the source or configuration:
 make up ARGS="--build"
 ```
 
-It reads the effective Compose configuration without printing credentials,
-waits for the web sidecar to become healthy when needed, and starts the
-publisher. For other source types, it stops an unused web sidecar only after
-the publisher starts successfully. It does not force a publisher restart when
+It validates the effective publisher and web configuration without printing
+credentials before changing services, waits for the web sidecar to become
+healthy when needed, and starts the publisher. It then requires a fresh
+heartbeat with both `healthy` and `ready` true; persisted status from an older
+publisher is not enough. For other source types, it stops an unused web sidecar
+only after that check succeeds. It does not force a publisher restart when
 the image and configuration are unchanged. The helper also accepts `-f`,
-`--env-file`, and `--project-name` through `ARGS`.
+`--env-file`, and `--project-name` through `ARGS`. Publisher readiness times out
+after 300 seconds by default; override it with `--ready-timeout SECONDS`.
 
 Compose limits each service to **2 CPUs and 2 GiB RAM** by default. Override
 `STREAMER_CPU_LIMIT`, `STREAMER_MEMORY_LIMIT`, `WEB_CPU_LIMIT`, or

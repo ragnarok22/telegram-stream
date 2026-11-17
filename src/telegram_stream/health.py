@@ -17,6 +17,7 @@ def read_status(directory: Path) -> dict[str, object]:
         value["healthy"] = (
             value.get("phase") not in {"stopped", "fatal"} and 0 <= time.time() - tick <= timeout
         )
+        value["ready"] = value["healthy"] and value.get("ready") is True
         return value
     except (OSError, ValueError, KeyError, TypeError):
         return {"healthy": False, "ready": False, "phase": "unavailable"}

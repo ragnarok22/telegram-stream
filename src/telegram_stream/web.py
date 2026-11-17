@@ -8,6 +8,7 @@ import re
 import signal
 import threading
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from functools import partial
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
@@ -42,24 +43,23 @@ class WebSettings:
     capture_scale: int = 2
 
     @classmethod
-    def from_env(cls) -> Self:
-        url = os.environ.get("PAGE_URL", "")
+    def from_env(cls, env: Mapping[str, str] | None = None) -> Self:
+        env = os.environ if env is None else env
+        url = env.get("PAGE_URL", "")
         parsed = urlsplit(url)
         if parsed.scheme not in {"http", "https"} or not parsed.hostname:
             raise FatalError("PAGE_URL must be an HTTP or HTTPS page")
-        fps = _number(os.environ, "WEB_FPS", 30, 1, 60)
+        fps = _number(env, "WEB_FPS", 30, 1, 60)
         settings = cls(
             url=url,
-            width=_number(os.environ, "WEB_WIDTH", 720, 128, 4096),
-            height=_number(os.environ, "WEB_HEIGHT", 1280, 128, 4096),
+            width=_number(env, "WEB_WIDTH", 720, 128, 4096),
+            height=_number(env, "WEB_HEIGHT", 1280, 128, 4096),
             fps=fps,
-            timeout=_number(os.environ, "WEB_READY_TIMEOUT", 60, 10, 300),
-            queue_size=_number(os.environ, "WEB_QUEUE_SIZE", 16, 1, 64),
-            video_bitrate=_bitrate(
-                os.environ.get("WEB_VIDEO_BITRATE", "2500k"), "WEB_VIDEO_BITRATE"
-            ),
-            capture_fps=_number(os.environ, "WEB_CAPTURE_FPS", fps, 1, 60),
-            capture_scale=_number(os.environ, "WEB_CAPTURE_SCALE", 2, 1, 2),
+            timeout=_number(env, "WEB_READY_TIMEOUT", 60, 10, 300),
+            queue_size=_number(env, "WEB_QUEUE_SIZE", 16, 1, 64),
+            video_bitrate=_bitrate(env.get("WEB_VIDEO_BITRATE", "2500k"), "WEB_VIDEO_BITRATE"),
+            capture_fps=_number(env, "WEB_CAPTURE_FPS", fps, 1, 60),
+            capture_scale=_number(env, "WEB_CAPTURE_SCALE", 2, 1, 2),
         )
         if settings.effective_capture_fps > settings.fps:
             raise FatalError("WEB_CAPTURE_FPS must not exceed WEB_FPS")
