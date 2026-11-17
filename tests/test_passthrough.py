@@ -7,18 +7,19 @@ from collections.abc import Generator
 from contextlib import contextmanager
 from dataclasses import replace
 from functools import partial
-from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler, SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import pytest
 
 from telegram_stream.config import Settings
 from telegram_stream.ffmpeg import FFmpeg, build_command
-from telegram_stream.process import spawn
+from telegram_stream.process import capture, spawn
 from telegram_stream.sources import (
     MediaInput,
     ResolvedSource,
     SourceResolver,
+    _fetch_web_copy_contract,
     _read_web_copy_contract,
 )
 
@@ -75,12 +76,12 @@ def contract_calls(
         assert command[0] == "ffprobe"
         return json.dumps({"streams": [video]}).encode()
 
-    def fake_contract(location: str, timeout: int) -> object:
+    async def fake_contract(location: str, timeout: int) -> object:
         calls.append(location)
         return contract
 
     monkeypatch.setattr("telegram_stream.sources.capture", fake_capture)
-    monkeypatch.setattr("telegram_stream.sources._read_web_copy_contract", fake_contract)
+    monkeypatch.setattr("telegram_stream.sources._fetch_web_copy_contract", fake_contract)
     return calls
 
 
@@ -291,10 +292,10 @@ def test_unavailable_contract_falls_back_before_startup(
     contract_calls: list[str],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    def unavailable(location: str, timeout: int) -> object:
+    async def unavailable(location: str, timeout: int) -> object:
         raise TimeoutError
 
-    monkeypatch.setattr("telegram_stream.sources._read_web_copy_contract", unavailable)
+    monkeypatch.setattr("telegram_stream.sources._fetch_web_copy_contract", unavailable)
     source = asyncio.run(SourceResolver(settings).resolve())
     command = build_command(settings, source, "output.flv")
     assert command[command.index("-c:v") + 1] == "libx264"
@@ -389,3 +390,71 @@ def test_contract_request_does_not_use_operator_proxy(
     monkeypatch.setenv("NO_PROXY", "")
     with sidecar(tmp_path, contract) as location:
         assert _read_web_copy_contract(location, 2) == contract
+
+
+def test_supervised_contract_reader_returns_metadata(
+    tmp_path: Path, contract: dict[str, object]
+) -> None:
+    with sidecar(tmp_path, contract) as location:
+        assert asyncio.run(_fetch_web_copy_contract(location, 2)) == contract
+
+
+def test_contract_timeout_closes_slow_http_reader(
+    settings: Settings,
+    video: dict[str, object],
+    contract: dict[str, object],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    disconnected = threading.Event()
+    stop = threading.Event()
+
+    class SlowHandler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            body = json.dumps(contract).encode()
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            try:
+                for byte in body:
+                    if stop.wait(0.05):
+                        return
+                    self.wfile.write(bytes([byte]))
+                    self.wfile.flush()
+            except OSError:
+                disconnected.set()
+
+        def log_message(self, format: str, *args: object) -> None:
+            pass
+
+    async def fake_capture(command: list[str], timeout: float) -> bytes:
+        if command[0] == "ffprobe":
+            return json.dumps({"streams": [video]}).encode()
+        return await capture(command, timeout)
+
+    monkeypatch.setattr("telegram_stream.sources.capture", fake_capture)
+    with ThreadingHTTPServer(("127.0.0.1", 0), SlowHandler) as server:
+        thread = threading.Thread(
+            target=server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True
+        )
+        thread.start()
+
+        async def scenario() -> None:
+            try:
+                source = await SourceResolver(
+                    replace(
+                        settings,
+                        rpc_timeout=2,
+                        web_stream_url=f"http://127.0.0.1:{server.server_port}/index.m3u8",
+                    )
+                ).resolve()
+                assert not source.video_copy
+                assert disconnected.wait(1), "HTTP reader survived the resolution timeout"
+            finally:
+                stop.set()
+
+        try:
+            asyncio.run(scenario())
+        finally:
+            stop.set()
+            server.shutdown()
+            thread.join(timeout=2)

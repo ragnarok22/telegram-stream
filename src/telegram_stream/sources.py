@@ -1,8 +1,8 @@
 """Resolve fresh input URLs and inspect media without blocking the event loop."""
 
-import asyncio
 import json
 import re
+import sys
 import tempfile
 from dataclasses import dataclass, field
 from fractions import Fraction
@@ -174,6 +174,24 @@ def _read_web_copy_contract(location: str, timeout: int) -> object:
         return None
 
 
+async def _fetch_web_copy_contract(location: str, timeout: int) -> object:
+    # A socket timeout alone cannot bound DNS, headers or a slowly trickled body.
+    # Reuse subprocess supervision so timeout/cancellation closes the entire reader.
+    output = await capture(
+        [
+            sys.executable,
+            "-c",
+            "import json, sys; "
+            "from telegram_stream.sources import _read_web_copy_contract; "
+            "print(json.dumps(_read_web_copy_contract(sys.argv[1], int(sys.argv[2]))))",
+            location,
+            str(timeout),
+        ],
+        timeout,
+    )
+    return json.loads(output)
+
+
 def _copy_contract_compatible(settings: Settings, info: object, stream: dict[str, object]) -> bool:
     """Version 1 describes the controlled sidecar's bounded x264 encoder."""
     if not isinstance(info, dict):
@@ -339,11 +357,8 @@ class SourceResolver:
         if copy_requested and _copy_video_compatible(self.settings, video_metadata):
             try:
                 timeout = min(3, self.settings.rpc_timeout)
-                async with asyncio.timeout(timeout):
-                    info = await asyncio.to_thread(
-                        _read_web_copy_contract, self.settings.web_stream_url, timeout
-                    )
+                info = await _fetch_web_copy_contract(self.settings.web_stream_url, timeout)
                 video_copy = _copy_contract_compatible(self.settings, info, video_metadata)
-            except (OSError, TimeoutError):
+            except (TemporaryError, OSError, TimeoutError, ValueError):
                 pass
         return ResolvedSource(inputs, video_index, audio_index, local, video_copy=video_copy)
